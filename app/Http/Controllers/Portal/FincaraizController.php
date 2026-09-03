@@ -93,6 +93,7 @@ class FincaraizController extends Controller
         $settings = $this->settings($request);
         $apiKey = $this->apiKey($settings);
         $clients = $this->fr->getClientInfo($apiKey);
+        $clients = $this->configuredClientOnly($clients, $settings['client_id'] ?? null);
         $agents = null;
         if ($clients['ok'] && ! empty($settings['client_id'])) {
             $agents = $this->fr->getAgents((string) $settings['client_id'], $apiKey);
@@ -104,6 +105,39 @@ class FincaraizController extends Controller
             'clients' => $clients,
             'agents' => $agents,
         ]]);
+    }
+
+    /**
+     * GET /client returns every account associated with the integrator API key.
+     * Each panel installation must expose only the account selected for its own
+     * database, otherwise quotas from unrelated clients are easy to confuse.
+     */
+    protected function configuredClientOnly(array $result, mixed $configuredClientId): array
+    {
+        $clientId = strtolower(trim((string) $configuredClientId));
+        if ($clientId === '' || ! ($result['ok'] ?? false) || ! is_array($result['data'] ?? null)) {
+            return $result;
+        }
+
+        $clients = collect($result['data'])
+            ->filter(fn ($client) => is_array($client)
+                && hash_equals($clientId, strtolower(trim((string) ($client['id'] ?? '')))))
+            ->values()
+            ->all();
+
+        if ($clients === []) {
+            return [
+                'ok' => false,
+                'status' => 404,
+                'data' => [
+                    'detail' => 'El Client ID configurado no pertenece a los clientes autorizados para esta API key.',
+                ],
+            ];
+        }
+
+        $result['data'] = $clients;
+
+        return $result;
     }
 
     public function locations(Request $request): JsonResponse

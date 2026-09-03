@@ -1,13 +1,13 @@
 # Integración Fincaraíz
 
-Implementación basada en el contrato OpenAPI `Fincaraiz.com.co/Integradores` 1.0.0 publicado en SwaggerHub.
+Implementación basada en el contrato OpenAPI [`Fincaraiz.com.co/Integradores` 1.0.0](https://app.swaggerhub.com/apis-docs/Fincaraiz.com.co/Integradores/1.0.0) publicado en SwaggerHub.
 
 ## Ambientes
 
 | `FINCARAIZ_ENV` | Base URL | Uso |
 |---|---|---|
 | `mock` | `https://virtserver.swaggerhub.com/Fincaraiz.com.co/Integradores/1.0.0` | Valida transporte y forma del contrato; no crea avisos reales. |
-| `qa` | `https://kong-qa.frcol.io/management/api/1.0` | Pruebas con credenciales QA de Fincaraíz. Es el valor predeterminado. |
+| `qa` | `https://api-integrators.frcol.io/management/api/1.0` | Pruebas con credenciales QA de Fincaraíz. Es el valor predeterminado. |
 | `production` | `https://msi-infofinca.fincaraiz.com.co/management/api/1.0` | Producción; activar solo después de aprobar QA. |
 
 `FINCARAIZ_API_URL` permite sobrescribir la URL, pero normalmente no debe definirse.
@@ -45,6 +45,21 @@ php artisan route:clear
 ```
 
 Las mismas credenciales de QA también se pueden guardar desde **Integraciones → Fincaraíz → Configurar QA**. La API key queda cifrada en `portal_credentials.access_token`; el panel nunca vuelve a mostrarla y permite conservarla dejando el campo vacío. Las variables de entorno siguen funcionando como configuración predeterminada.
+
+## Varios clientes asociados al mismo integrador
+
+Es normal que una API key muestre dos o más clientes: el contrato de Fincaraíz define `GET /client` como el listado de **todos los clientes asociados al integrador**. Esto no significa que los catálogos estén mezclados.
+
+Cada instalación del panel selecciona un único cliente mediante `FINCARAIZ_CLIENT_ID` o desde **Integraciones → Fincaraíz → Configurar**. El backend filtra la respuesta de `/client`, muestra solamente ese cliente y consulta sus agentes con `GET /client/{client_id}/agent`. Los avisos se consultan usando ese mismo cliente.
+
+No se debe eliminar ni desvincular el otro cliente en Fincaraíz si será utilizado por otra empresa o base de datos. La separación recomendada es:
+
+| Instalación | Base del panel | Base WordPress | `FINCARAIZ_CLIENT_ID` | Webhook |
+|---|---|---|---|---|
+| Servidor A | Independiente | Catálogo A | Cliente A | URL/token A |
+| Servidor B | Independiente | Catálogo B | Cliente B | URL/token B |
+
+La API key puede ser la misma si Fincaraíz la autorizó para ambos clientes. El `CLIENT_ID`, el agente, las bases de datos, los estados de sincronización y el webhook deben corresponder a cada instalación.
 
 ## Reglas importantes del contrato
 
@@ -120,3 +135,173 @@ La URL debe ser HTTPS y accesible públicamente. Durante QA también se puede ve
 7. Habilitar automatización o cargas masivas solo después de esa validación.
 
 No se debe ejecutar `validate-listing` durante la puesta en marcha inicial.
+
+## Montaje completo en un segundo servidor y otra base de datos
+
+Esta secuencia monta una instalación aislada para el segundo cliente. Sustituye todos los valores entre `<...>` y no copies secretos en el repositorio.
+
+### 1. Preparar DNS, servidor y bases
+
+- PHP 8.2 o superior con extensiones de Laravel y MySQL, Composer 2, Node.js 20 o superior y npm.
+- Un dominio HTTPS para el panel y otro para la API, por ejemplo `panel-otra.example.com` y `api-otra.example.com`.
+- Una base MySQL vacía para Laravel (`DB_DATABASE`).
+- La base WordPress/JetEngine que contiene el segundo catálogo (`WORDPRESS_DB_DATABASE`).
+- El usuario MySQL del backend necesita permisos sobre su base Laravel y lectura sobre el catálogo WordPress. Durante la primera migración también necesita `ALTER` sobre `wp_jet_cct_barrios` para crear los tres campos de homologación de Fincaraíz.
+
+Haz copia de seguridad de ambas bases antes de migrar. No apuntes el servidor B a la base Laravel ni a la base WordPress del servidor A.
+
+### 2. Instalar el backend
+
+```bash
+git clone <URL_BACKEND> backend
+cd backend
+composer install --no-dev --optimize-autoloader
+```
+
+Crea `.env` mediante el administrador de secretos del servidor o a partir de una plantilla local segura. Configuración mínima:
+
+```dotenv
+APP_NAME="Panel de portales"
+APP_ENV=production
+APP_KEY=
+APP_DEBUG=false
+APP_URL=https://api-otra.example.com
+
+DB_CONNECTION=mysql
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_DATABASE=<BASE_LARAVEL_SERVIDOR_B>
+DB_USERNAME=<USUARIO_LARAVEL_B>
+DB_PASSWORD=<CLAVE_LARAVEL_B>
+
+PROPERTIES_SOURCE=wordpress
+AUTH_SOURCE=wordpress_funcionarios
+SEED_DEMO_DATA=false
+WORDPRESS_DB_HOST=127.0.0.1
+WORDPRESS_DB_PORT=3306
+WORDPRESS_DB_DATABASE=<BASE_WORDPRESS_CATALOGO_B>
+WORDPRESS_DB_USERNAME=<USUARIO_WORDPRESS_B>
+WORDPRESS_DB_PASSWORD=<CLAVE_WORDPRESS_B>
+
+FRONTEND_URL=https://panel-otra.example.com
+CORS_ALLOWED_ORIGINS=https://panel-otra.example.com
+SANCTUM_STATEFUL_DOMAINS=panel-otra.example.com
+
+FINCARAIZ_ENV=production
+FINCARAIZ_API_KEY=<API_KEY_PRODUCCION>
+FINCARAIZ_CLIENT_ID=<UUID_DEL_SEGUNDO_CLIENTE>
+FINCARAIZ_CLIENT_AGENT=<ID_NUMERICO_DE_UN_AGENTE_DEL_SEGUNDO_CLIENTE>
+FINCARAIZ_CONTACT_EMAIL=<CORREO_COMERCIAL>
+FINCARAIZ_CONTACT_PHONE=<TELEFONO>
+FINCARAIZ_CONTACT_WHATSAPP=<WHATSAPP>
+FINCARAIZ_SHOW_EXACT_ADDRESS=false
+FINCARAIZ_DUAL_OFFER=rent
+FINCARAIZ_TIMEOUT=30
+
+# Mantener apagado hasta terminar la prueba controlada.
+FINCARAIZ_AUTO_SYNC=false
+FINCARAIZ_AUTO_SYNC_LIMIT=20
+FINCARAIZ_AUTO_SYNC_SCAN=500
+
+# Deben ser propios del servidor B.
+FINCARAIZ_WEBHOOK_ID=<ID_WEBHOOK_B>
+FINCARAIZ_WEBHOOK_VERIFY_TOKEN=<TOKEN_ALEATORIO_LARGO_B>
+FINCARAIZ_WEBHOOK_URL=https://api-otra.example.com/api/portals/fincaraiz/webhook
+```
+
+Genera una llave de aplicación distinta a la del primer servidor y prepara la base:
+
+```bash
+php artisan key:generate
+php artisan migrate --force
+php artisan db:seed --class=IntegrationSeeder --force
+php artisan storage:link
+php artisan optimize
+```
+
+El servidor web debe publicar únicamente `backend/public`; nunca la raíz del repositorio ni el archivo `.env`.
+
+### 3. Evitar que una credencial copiada sobrescriba `.env`
+
+La configuración guardada desde el panel es por usuario y tiene prioridad sobre `FINCARAIZ_API_KEY`, `FINCARAIZ_CLIENT_ID` y los demás valores del entorno. En una base Laravel nueva no habrá conflicto. Si se clonó una base existente, elimina o actualiza **desde la interfaz** la credencial Fincaraíz de ese usuario antes de probar; no reutilices el `portal_credentials` ni los `property_sync_statuses` del cliente A.
+
+En **Integraciones → Fincaraíz → Configurar**, confirma que el Client ID visible sea el del segundo cliente. Al pulsar **Probar API**, debe aparecer exactamente un cliente. Si el UUID no pertenece a la API key, el panel mostrará un error explícito y no consultará agentes.
+
+### 4. Obtener el agente correcto
+
+El agente no es el UUID del cliente. Selecciona el Client ID del servidor B y ejecuta **Probar API**; el panel consulta `GET /client/{client_id}/agent`. Copia el identificador numérico del agente/sucursal que atenderá los avisos a `FINCARAIZ_CLIENT_AGENT` o guárdalo desde la configuración del panel.
+
+### 5. Instalar el panel
+
+```bash
+git clone <URL_PANEL> panel
+cd panel
+npm ci
+```
+
+Crea `panel/.env.production`:
+
+```dotenv
+VITE_API_BASE_URL=https://api-otra.example.com/api
+VITE_API_PROPS_URL=https://api-otra.example.com/api
+VITE_SCRIPT_PHP_URL=https://api-otra.example.com/api/portals
+VITE_FRONTEND_URL=https://panel-otra.example.com
+VITE_APP_NAME="Panel de portales"
+```
+
+Luego compila y publica el contenido de `panel/dist`:
+
+```bash
+npm run build
+```
+
+El hosting debe servir `index.html` como fallback de la aplicación. Las rutas actuales usan hash (`#/...`), por lo que no requieren reescrituras adicionales para esas páginas.
+
+### 6. Activar el programador
+
+La sincronización automática depende del scheduler de Laravel. En Linux configura una sola entrada cron:
+
+```cron
+* * * * * cd /ruta/absoluta/backend && php artisan schedule:run >> /dev/null 2>&1
+```
+
+En Windows crea una tarea cada minuto que ejecute:
+
+```text
+C:\ruta\a\php.exe C:\ruta\absoluta\backend\artisan schedule:run
+```
+
+Con `FINCARAIZ_AUTO_SYNC=false` el scheduler puede estar activo sin publicar en Fincaraíz.
+
+### 7. Validación segura antes de automatizar
+
+1. Comprueba `GET https://api-otra.example.com/api/health`.
+2. Inicia sesión y abre **Integraciones → Fincaraíz**.
+3. Verifica ambiente `production`, Client ID del servidor B, un solo cliente visible, cupos y agentes correctos.
+4. Homologa primero un barrio desde **Barrios → Fincaraíz**.
+5. Elige un inmueble público controlado, ejecuta el preflight y corrige todos los errores.
+6. Publícalo manualmente, espera la tarea, verifica que guarde su `listing_id` y actívalo.
+7. Confirma el aviso tanto en el panel como en la Oficina Virtual de ese segundo cliente.
+8. Actualiza un dato no crítico y verifica la actualización; luego prueba despublicar y reactivar.
+9. Suscribe y prueba el webhook propio del servidor B.
+10. Cuando todo sea correcto, activa **Sincronización automática** desde el panel o cambia `FINCARAIZ_AUTO_SYNC=true`, limpia caché y observa el primer lote con límite bajo.
+
+Después de cualquier cambio en `.env` ejecuta:
+
+```bash
+php artisan optimize:clear
+php artisan optimize
+```
+
+### 8. Lista de control para no mezclar clientes
+
+- [ ] Base Laravel B distinta de la base Laravel A.
+- [ ] Base WordPress B corresponde únicamente al catálogo B.
+- [ ] `FINCARAIZ_CLIENT_ID` es el segundo UUID, no el del servidor A.
+- [ ] `FINCARAIZ_CLIENT_AGENT` pertenece al segundo cliente.
+- [ ] No se copiaron referencias `listing_id` ni estados de sincronización del primer cliente.
+- [ ] URL, ID y token del webhook son propios del servidor B.
+- [ ] Solo aparece un cliente al probar la API.
+- [ ] Los cupos coinciden con la Oficina Virtual del segundo cliente.
+- [ ] Se validó un inmueble manual antes de activar automatización.
+- [ ] Nunca se ejecutó `POST /validate-listing` durante la instalación.

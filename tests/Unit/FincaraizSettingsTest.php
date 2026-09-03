@@ -111,4 +111,89 @@ class FincaraizSettingsTest extends TestCase
             PortalCredential::firstOrFail()->data['fincaraiz_catalog_snapshot']
         );
     }
+
+    public function test_client_info_only_exposes_the_client_configured_for_this_installation(): void
+    {
+        $clientId = '2cc4b423-621c-47d5-a798-041ef44bb9ec';
+        PortalCredential::create([
+            'user_id' => 15,
+            'integration_id' => 1,
+            'account_key' => 'user:15',
+            'access_token' => 'production-key',
+            'data' => ['client_id' => $clientId],
+        ]);
+        $user = new User;
+        $user->id = 15;
+        $user->exists = true;
+        $request = Request::create('/api/portals/fincaraiz/client', 'GET');
+        $request->setUserResolver(fn () => $user);
+
+        $client = $this->createMock(FincaraizClient::class);
+        $client->expects($this->once())
+            ->method('getClientInfo')
+            ->with('production-key')
+            ->willReturn([
+                'ok' => true,
+                'status' => 200,
+                'data' => [
+                    ['id' => $clientId, 'name' => 'Cliente de esta base', 'used_quota' => 510],
+                    ['id' => '31aa55cb-4f04-41f8-8e30-5f0c99005591', 'name' => 'Cliente de la otra base', 'used_quota' => 80],
+                ],
+            ]);
+        $client->expects($this->once())
+            ->method('getAgents')
+            ->with($clientId, 'production-key')
+            ->willReturn(['ok' => true, 'status' => 200, 'data' => []]);
+
+        $controller = new FincaraizController(
+            $client,
+            $this->createMock(FincaraizPropertyMapper::class)
+        );
+        $data = $controller->clientInfo($request)->getData(true)['Datos'];
+
+        $this->assertTrue($data['ok']);
+        $this->assertCount(1, $data['clients']['data']);
+        $this->assertSame($clientId, $data['clients']['data'][0]['id']);
+        $this->assertSame('Cliente de esta base', $data['clients']['data'][0]['name']);
+    }
+
+    public function test_client_info_reports_a_mismatched_client_and_does_not_request_agents(): void
+    {
+        $configuredClientId = '2cc4b423-621c-47d5-a798-041ef44bb9ec';
+        PortalCredential::create([
+            'user_id' => 15,
+            'integration_id' => 1,
+            'account_key' => 'user:15',
+            'access_token' => 'production-key',
+            'data' => ['client_id' => $configuredClientId],
+        ]);
+        $user = new User;
+        $user->id = 15;
+        $user->exists = true;
+        $request = Request::create('/api/portals/fincaraiz/client', 'GET');
+        $request->setUserResolver(fn () => $user);
+
+        $client = $this->createMock(FincaraizClient::class);
+        $client->expects($this->once())
+            ->method('getClientInfo')
+            ->willReturn([
+                'ok' => true,
+                'status' => 200,
+                'data' => [[
+                    'id' => '31aa55cb-4f04-41f8-8e30-5f0c99005591',
+                    'name' => 'Cliente de la otra base',
+                ]],
+            ]);
+        $client->expects($this->never())->method('getAgents');
+
+        $controller = new FincaraizController(
+            $client,
+            $this->createMock(FincaraizPropertyMapper::class)
+        );
+        $data = $controller->clientInfo($request)->getData(true)['Datos'];
+
+        $this->assertFalse($data['ok']);
+        $this->assertSame(404, $data['clients']['status']);
+        $this->assertStringContainsString('no pertenece', $data['clients']['data']['detail']);
+    }
 }

@@ -3,7 +3,7 @@
 $fincaraizEnvironment = env('FINCARAIZ_ENV', 'qa');
 $fincaraizUrls = [
     'mock' => 'https://virtserver.swaggerhub.com/Fincaraiz.com.co/Integradores/1.0.0',
-    'qa' => 'https://kong-qa.frcol.io/management/api/1.0',
+    'qa' => 'https://api-integrators.frcol.io/management/api/1.0',
     'production' => 'https://msi-infofinca.fincaraiz.com.co/management/api/1.0',
 ];
 
