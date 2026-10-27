@@ -115,10 +115,20 @@ class ProppitClient
 
     public function deleteAd(string $referenceId, string $token): array
     {
-        return $this->request('DELETE', $this->countryPath('/ads/' . rawurlencode($referenceId)), [
+        $result = $this->request('DELETE', $this->countryPath('/ads/' . rawurlencode($referenceId)), [
             'query' => ['externalId' => config('portals.proppit.publisher_external_id')],
             'token' => $token,
         ]);
+
+        // A missing ad already satisfies the requested withdrawal. Other 404s
+        // (publisher or endpoint) must remain errors, as do authentication failures.
+        if (($result['status'] ?? null) === 404
+            && data_get($result, 'data.body.error') === 'Ad not found') {
+            $result['ok'] = true;
+            $result['already_absent'] = true;
+        }
+
+        return $result;
     }
 
     public function propertyTypes(string $token): array

@@ -236,6 +236,25 @@ class ProppitClientTest extends TestCase
         }
     }
 
+    public function test_withdrawal_accepts_only_an_explicit_missing_ad_as_already_absent(): void
+    {
+        $client = $this->clientWith([
+            new Response(404, [], '{"error":"Ad not found","requestId":"absent-123"}'),
+            new Response(404, [], '{"error":"Publisher not found"}'),
+            new Response(404, [], '<html>Not Found</html>'),
+            new Response(401, [], '{"error":"Unauthorized"}'),
+        ]);
+
+        $absent = $client->deleteAd('100', 'token');
+        $this->assertTrue($absent['ok']);
+        $this->assertTrue($absent['already_absent']);
+        $this->assertSame(404, $absent['status']);
+        $this->assertSame('absent-123', $absent['data']['body']['requestId']);
+        foreach (['200', '300', '400'] as $reference) {
+            $this->assertFalse($client->deleteAd($reference, 'token')['ok']);
+        }
+    }
+
     public function test_get_ads_verifies_multiple_known_references(): void
     {
         config()->set('portals.proppit.publisher_external_id', 'sucasa');
