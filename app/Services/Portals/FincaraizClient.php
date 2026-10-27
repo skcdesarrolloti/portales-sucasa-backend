@@ -108,9 +108,11 @@ class FincaraizClient
             ->all();
     }
 
-    public function getListing(string $apiKey, string $listingId): array
+    public function getListing(string $apiKey, string $listingId, string $clientId): array
     {
-        return $this->request('GET', '/listing/'.rawurlencode($listingId), $apiKey);
+        return $this->request('GET', '/listing/'.rawurlencode($listingId), $apiKey, null, [], [
+            'Cookie' => $clientId,
+        ]);
     }
 
     public function createListing(array $payload, string $apiKey): array

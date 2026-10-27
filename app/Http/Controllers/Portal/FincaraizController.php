@@ -385,7 +385,7 @@ class FincaraizController extends Controller
         }
 
         $settings = $this->settings($request);
-        $listing = $this->fr->getListing($this->apiKey($settings), $sync->external_id);
+        $listing = $this->fr->getListing($this->apiKey($settings), $sync->external_id, $this->clientId($settings));
 
         if (! $listing['ok']) {
             if ((int) ($listing['status'] ?? 0) === 404) {
@@ -456,7 +456,7 @@ class FincaraizController extends Controller
             : ['ok' => false, 'status' => 404, 'data' => ['message' => 'Task id not found']];
         if ((int) ($result['status'] ?? 0) === 404
             || str_contains(strtolower(json_encode($result['data'] ?? [])), 'task id not found')) {
-            return $this->resolveExpiredTask($sync, $apiKey, $result);
+            return $this->resolveExpiredTask($sync, $apiKey, $this->clientId($settings), $result);
         }
         if ($result['ok']) {
             $this->applyTaskResult($property, $result['data'], $sync);
@@ -472,7 +472,7 @@ class FincaraizController extends Controller
         $fresh = $sync->fresh();
         $listingVerification = null;
         if ($result['ok'] && $fresh?->sync_status === 'synced' && $fresh->external_id) {
-            $listingVerification = $this->fr->getListing($apiKey, $fresh->external_id);
+            $listingVerification = $this->fr->getListing($apiKey, $fresh->external_id, $this->clientId($settings));
             $this->applyListingVerification($fresh, $listingVerification);
             $fresh = $fresh->fresh();
         }
@@ -487,9 +487,9 @@ class FincaraizController extends Controller
         ]]);
     }
 
-    protected function resolveExpiredTask(PropertySyncStatus $sync, string $apiKey, array $taskResult): JsonResponse
+    protected function resolveExpiredTask(PropertySyncStatus $sync, string $apiKey, string $clientId, array $taskResult): JsonResponse
     {
-        $listing = $sync->external_id ? $this->fr->getListing($apiKey, $sync->external_id) : null;
+        $listing = $sync->external_id ? $this->fr->getListing($apiKey, $sync->external_id, $clientId) : null;
         $response = $sync->last_response ?? [];
         $action = $response['action'] ?? 'publish';
         $response['expired_task'] = $taskResult;

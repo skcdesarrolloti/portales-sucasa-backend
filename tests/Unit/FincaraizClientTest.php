@@ -57,6 +57,19 @@ class FincaraizClientTest extends TestCase
         $this->assertNotEmpty($query['sucasa-cache']);
     }
 
+    public function test_individual_listing_requires_the_same_client_scope_as_inventory_queries(): void
+    {
+        $client = $this->clientWith([new Response(200, [], '{"status":4}')]);
+        $result = $client->getListing('secret-key', 'listing-uuid', 'selected-client-uuid');
+        $this->assertTrue($result['ok']);
+        $request = $this->history[0]['request'];
+        $this->assertSame('/management/api/1.0/listing/listing-uuid', $request->getUri()->getPath());
+        $this->assertSame('selected-client-uuid', $request->getHeaderLine('Cookie'));
+        $this->assertSame('secret-key', $request->getHeaderLine('apikey'));
+        parse_str($request->getUri()->getQuery(), $query);
+        $this->assertNotEmpty($query['sucasa-cache']);
+    }
+
     public function test_non_success_http_status_is_not_reported_as_ok(): void
     {
         $client = $this->clientWith([
