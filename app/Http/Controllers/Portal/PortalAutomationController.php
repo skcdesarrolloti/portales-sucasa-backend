@@ -41,6 +41,8 @@ class PortalAutomationController extends Controller
             $query->whereHas('integration', fn ($query) => $query->where('slug', $portal));
         }
 
+        $summaryItems = (clone $query)->get()->map(fn (PropertySyncStatus $sync) => $this->itemPayload($sync));
+
         if ($status !== '' && $status !== 'all') {
             $query->where('sync_status', $status);
         }
@@ -81,7 +83,8 @@ class PortalAutomationController extends Controller
                 'description' => $integration->description,
                 'active' => $integration->active,
             ])->values(),
-            'summary' => $this->summaryPayload($allItems, $portal),
+            'summary' => $this->summaryPayload($summaryItems, $portal),
+            'summary_scope' => 'portal',
             'error_types' => $errorTypes,
             'pagination' => $this->paginationPayload($page, $perPage, $total),
             'items' => $items,
@@ -248,11 +251,14 @@ class PortalAutomationController extends Controller
     protected function configPayload(string $portal): array
     {
         if ($portal === '' || $portal === 'all') {
+            $configurations = collect(['fincaraiz', 'ciencuadras', 'proppit'])
+                ->mapWithKeys(fn ($slug) => [$slug => $this->configPayload($slug)]);
             return [
-                'auto_sync' => (bool) config('portals.ciencuadras.auto_sync'),
+                'auto_sync' => $configurations->contains(fn ($settings) => $settings['auto_sync']),
                 'limit' => (int) config('portals.ciencuadras.auto_sync_limit', 20),
                 'scan' => (int) config('portals.ciencuadras.auto_sync_scan', 500),
-                'schedule' => 'Ciencuadras reconcilia cada 10 minutos, publica cada 5 y verifica pendientes cada minuto.',
+                'schedule' => 'Cada portal tiene su propia configuración. Selecciona uno para ver su estado y frecuencia.',
+                'portals' => $configurations->all(),
             ];
         }
 
@@ -268,6 +274,15 @@ class PortalAutomationController extends Controller
                 'limit' => (int) data_get($credential?->data, 'auto_sync_limit', config('portals.fincaraiz.auto_sync_limit', 20)),
                 'scan' => (int) config('portals.fincaraiz.auto_sync_scan', 500),
                 'schedule' => 'Publicación, actualización, retiro y verificación automática cada 5 minutos.',
+            ];
+        }
+
+        if ($portal === 'proppit') {
+            return [
+                'auto_sync' => (bool) config('portals.proppit.auto_sync'),
+                'limit' => (int) config('portals.proppit.auto_sync_limit', 20),
+                'scan' => (int) config('portals.proppit.auto_sync_scan', 500),
+                'schedule' => 'Publicación, actualización y retiro automático cada 5 minutos.',
             ];
         }
 

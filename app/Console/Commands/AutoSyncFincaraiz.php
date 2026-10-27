@@ -72,6 +72,8 @@ class AutoSyncFincaraiz extends Command
             'error' => 0,
         ];
 
+        // Reserve at least half the run for catalog work, even if old tasks never finish.
+        $pendingLimit = max(1, intdiv($limit, 2));
         $pending = PropertySyncStatus::query()
             ->where('integration_id', $integration->id)
             ->where('environment', config('portals.fincaraiz.environment'))
@@ -79,11 +81,13 @@ class AutoSyncFincaraiz extends Command
             ->where('sync_status', 'pending')
             ->with('property')
             ->oldest('last_attempt_at')
-            ->limit($limit)
+            ->when($this->option('code'), fn ($query) => $query->whereHas('property',
+                fn ($properties) => $properties->whereIn('code', (array) $this->option('code'))))
+            ->limit($pendingLimit)
             ->get();
 
         foreach ($pending as $sync) {
-            if ($executed >= $limit || ! $sync->property || ! $this->taskId($sync)) {
+            if ($executed >= $pendingLimit || ! $sync->property) {
                 continue;
             }
 
@@ -106,12 +110,16 @@ class AutoSyncFincaraiz extends Command
             $summary['verify']++;
             $executed++;
             $fresh = $sync->fresh();
-            if ($executed < $limit
+            if ($executed < $pendingLimit
                 && $fresh?->sync_status === 'pending'
                 && $fresh?->external_id
                 && data_get($fresh->last_response, 'action') === 'activate_required') {
-                if ($this->invoke($controller, 'activate', $request, $code)) {
-                    $summary['activate']++;
+                $public = DB::connection('wordpress')->table('wp_jet_cct_inmuebles')
+                    ->where('codigo', $code)->where('cct_status', 'publish')
+                    ->get(['estado'])->contains(fn ($row) => $this->isPublicStatus($row->estado));
+                $action = $public ? 'activate' : 'pause';
+                if ($this->invoke($controller, $action, $request, $code)) {
+                    $summary[$action]++;
                 } else {
                     $summary['error']++;
                 }
@@ -281,7 +289,7 @@ class AutoSyncFincaraiz extends Command
                 return $sync->external_id ? 'activate' : 'publish';
             }
             if ($current === 'error') {
-                return $retryErrors ? 'recover' : null;
+                return ($retryErrors || \App\Services\Portals\PortalSyncPolicy::retryError($row, $sync)) ? 'recover' : null;
             }
 
             $modifiedAt = $this->wpModifiedAt($row);
@@ -323,16 +331,7 @@ class AutoSyncFincaraiz extends Command
 
     protected function wpModifiedAt(stdClass $row): ?Carbon
     {
-        $value = ($row->fecha_actualizacion ?? null) ?: ($row->cct_modified ?? null);
-        if (! $value) {
-            return null;
-        }
-
-        try {
-            return is_numeric($value) ? Carbon::createFromTimestamp((int) $value) : Carbon::parse($value);
-        } catch (Throwable) {
-            return null;
-        }
+        return \App\Services\Portals\PortalSyncPolicy::modifiedAt($row);
     }
 
     protected function taskId(PropertySyncStatus $sync): ?string

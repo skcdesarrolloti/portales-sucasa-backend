@@ -556,7 +556,9 @@ class CiencuadrasController extends Controller
             'last_response' => $response,
             'last_error' => $error,
             'last_attempt_at' => now(),
-            'last_synced_at' => in_array($syncStatus, ['synced', 'paused'], true) ? now() : $status->last_synced_at,
+            'last_synced_at' => in_array($syncStatus, ['synced', 'paused'], true)
+                && ($incrementAttempt || $syncStatus === 'paused' || ! empty($response['idRequest']))
+                    ? now() : $status->last_synced_at,
             'attempts' => ((int) $status->attempts) + ($incrementAttempt ? 1 : 0),
         ]);
         $status->save();
@@ -564,121 +566,13 @@ class CiencuadrasController extends Controller
 
     protected function syncState(array $result, ?array $statusResult, string $targetStatus, ?array $propertyResult = null): string
     {
-        if ($targetStatus === 'I' || $targetStatus === 'D') {
-            if ($this->responseHasInactive($propertyResult['data'] ?? null)
-                || $this->responseHasNotFound($propertyResult['data'] ?? null)) {
-                return 'paused';
-            }
-
-            if (! ($result['ok'] ?? false)) {
-                return 'error';
-            }
-
-            $data = $statusResult['data'] ?? $result['data'] ?? [];
-            $json = strtolower(json_encode($data));
-
-            if ($this->responseHasSuccess($statusResult['data'] ?? null)) {
-                return 'paused';
-            }
-
-            if ($this->responseIsPending($statusResult['data'] ?? null)) {
-                return 'pending';
-            }
-
-            if (str_contains($json, 'error') || str_contains($json, 'fall')) {
-                return 'error';
-            }
-
-            return 'pending';
-        }
-
-        if ($this->responseHasActive($propertyResult['data'] ?? null)) {
-            return 'synced';
-        }
-
-        if (! ($result['ok'] ?? false)) {
-            return 'error';
-        }
-
-        $data = $statusResult['data'] ?? $result['data'] ?? [];
-        $json = strtolower(json_encode($data));
-
-        if ($this->responseHasSuccess($statusResult['data'] ?? null)) {
-            return 'synced';
-        }
-
-        if (str_contains($json, 'error') || str_contains($json, 'fall')) {
-            return 'error';
-        }
-
-        if ($this->responseIsPending($statusResult['data'] ?? null)
-            || $this->responseHasNotFound($propertyResult['data'] ?? null)) {
-            return 'pending';
-        }
-
-        if ($this->responseHasInactive($propertyResult['data'] ?? null)) {
-            return 'error';
-        }
-
-        return 'pending';
+        return \App\Services\Portals\CiencuadrasOperationState::resolve($result, $statusResult, $propertyResult, $targetStatus);
     }
 
     protected function verifiedSyncState(?array $statusResult, array $propertyResult, ?string $currentStatus, ?string $targetStatus = null): string
     {
-        $statusData = $statusResult['data'] ?? null;
-        $propertyData = $propertyResult['data'] ?? null;
-
-        if ($targetStatus === 'I' || $targetStatus === 'D' || $currentStatus === 'paused') {
-            if ($this->responseHasInactive($propertyData)
-                || $this->responseHasNotFound($propertyData)) {
-                return 'paused';
-            }
-
-            if ($this->responseHasSuccess($statusData)) {
-                return 'paused';
-            }
-
-            if ($this->responseHasError($statusData)) {
-                return 'error';
-            }
-
-            if ($this->responseIsPending($statusData)) {
-                return 'pending';
-            }
-
-            if (! ($propertyResult['ok'] ?? false)) {
-                return 'error';
-            }
-
-            return 'pending';
-        }
-
-        if ($this->responseHasActive($propertyData)) {
-            return 'synced';
-        }
-
-        if ($this->responseHasSuccess($statusData)) {
-            return 'synced';
-        }
-
-        if ($this->responseHasError($statusData)) {
-            return 'error';
-        }
-
-        if ($this->responseIsPending($statusData)
-            || $this->responseHasNotFound($propertyData)) {
-            return 'pending';
-        }
-
-        if ($this->responseHasInactive($propertyData)) {
-            return 'error';
-        }
-
-        if ($this->responseHasError($propertyData) || ! ($propertyResult['ok'] ?? false)) {
-            return 'error';
-        }
-
-        return 'pending';
+        return \App\Services\Portals\CiencuadrasOperationState::resolve(null, $statusResult, $propertyResult,
+            $targetStatus ?? ($currentStatus === 'paused' ? 'I' : null));
     }
 
     protected function consultCodeForStatus(?PropertySyncStatus $status, string $default): string
@@ -695,7 +589,7 @@ class CiencuadrasController extends Controller
             'integration_id' => $this->integration()->id,
             'environment' => config('portals.ciencuadras.environment'),
         ])->first();
-        $existingCode = $this->extractPropertyCode($status?->last_response ?? null);
+        $existingCode = $status?->external_id ?: $this->extractPropertyCode($status?->last_response ?? null);
 
         if ($credential) {
             $resolvedCode = $this->activePayloadCodeForExistingListing($existingCode ?: $default, $credential, $targetStatus)
@@ -707,11 +601,7 @@ class CiencuadrasController extends Controller
         }
 
         if ($existingCode) {
-            if (preg_match('/(?:^|-)P\d+$/i', $existingCode)) {
-                return 'P'.$this->mapper->portalPropertyCode($existingCode);
-            }
-
-            return $this->mapper->portalPropertyCode($existingCode);
+            return $this->payloadCodeFromConsultCode($existingCode);
         }
 
         return $this->mapper->portalPropertyCode($default);
@@ -763,7 +653,7 @@ class CiencuadrasController extends Controller
             return $code;
         }
 
-        if (preg_match('/^P\d+$/i', $code) === 1) {
+        if (preg_match('/^P+\d+$/i', $code) === 1) {
             return $prefix.$code;
         }
 
@@ -772,6 +662,10 @@ class CiencuadrasController extends Controller
 
     protected function consultPropertyWithFallback(string $code, PortalCredential $cred, ?string $targetStatus = null): array
     {
+        if (in_array($targetStatus, ['I', 'D'], true)) {
+            return ($this->activeProperties)->consultForWithdrawal($code, $cred);
+        }
+
         $first = null;
         $isInactiveTarget = in_array($targetStatus, ['I', 'D'], true);
 
@@ -798,6 +692,7 @@ class CiencuadrasController extends Controller
     protected function consultCodeCandidates(string $code): array
     {
         return array_values(array_unique([
+            ...(str_contains($code, '-P') ? [$code] : []),
             $this->mapper->lookupCode($code),
             $this->mapper->legacyLookupCode($code),
         ]));

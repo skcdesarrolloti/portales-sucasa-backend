@@ -121,19 +121,32 @@ class PortalCatalogAuditService
 
     protected function auditCiencuadras(Integration $integration, Collection $localCodes): array
     {
-        $remoteCodes = $this->ciencuadras->sourceCodes(fresh: true);
-        if ($remoteCodes === null) {
+        $inventory = $this->ciencuadras->inventory(fresh: true);
+        if ($inventory === null) {
             return $this->unavailableResult($integration, $localCodes, 'Ciencuadras no devolvió su inventario.');
         }
 
-        return $this->comparisonResult(
+        $groups = $inventory->groupBy(fn (array $row) => $this->ciencuadras->sourceCode($row['propertyCode']));
+        $remoteCodes = $groups->keys()->map(fn ($code) => (string) $code);
+        $duplicates = $groups->sum(fn (Collection $rows) => max(0, $rows->count() - 1));
+        $result = $this->comparisonResult(
             $integration,
             $localCodes,
             $remoteCodes,
             $this->registryCodes($integration, config('portals.ciencuadras.environment')),
             'Inventario completo de la API',
-            'Ciencuadras confirma presencia en el catálogo, pero su listado global no informa el estado activo de cada código.'
+            "La API devuelve {$inventory->count()} registros para {$remoteCodes->count()} inmuebles distintos; {$duplicates} registros adicionales repiten inmueble. El listado no informa el estado activo individual."
         );
+        $result['remote_rows'] = $inventory->count();
+        $result['duplicate_rows'] = $duplicates;
+        $result['details']['duplicates'] = $groups->filter(fn (Collection $rows) => $rows->count() > 1)
+            ->map(fn (Collection $rows, $code) => ['code' => (string) $code, 'rows' => $rows->count(),
+                'references' => $rows->pluck('propertyCode')->all()])->values()->all();
+        if ($duplicates > 0) {
+            $result['status'] = 'differences';
+        }
+
+        return $result;
     }
 
     protected function auditFincaraiz(Integration $integration, Collection $localCodes, ?int $userId): array

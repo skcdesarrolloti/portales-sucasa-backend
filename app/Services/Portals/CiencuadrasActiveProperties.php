@@ -48,18 +48,21 @@ class CiencuadrasActiveProperties
             ->map(fn ($code) => $this->sourceCode((string) $code))
             ->filter()
             ->unique();
+        $reportedActiveCodes = $this->reportedActiveCodes($credential);
         $portalCodes = $sourceCodes
-            ->flatMap(fn (string $code) => [$prefix.$code, $prefix.'P'.$code])
+            ->flatMap(fn (string $code) => [$prefix.$code, $prefix.'P'.$code, $prefix.'PP'.$code])
             ->unique()
             ->values();
         $results = $this->client->consultProperties($portalCodes->all(), $credential);
-        $reportedActiveCodes = $this->reportedActiveCodes($credential);
 
         return $sourceCodes->mapWithKeys(function (string $sourceCode) use ($prefix, $results, $reportedActiveCodes) {
             $candidates = [
                 $prefix.$sourceCode,
                 $prefix.'P'.$sourceCode,
+                $prefix.'PP'.$sourceCode,
             ];
+            $candidates = array_unique(array_merge($candidates, ($reportedActiveCodes ?? collect())
+                ->filter(fn ($code) => $this->sourceCode($code) === $sourceCode)->all()));
             $reportedCode = $this->firstReportedCode($candidates, $reportedActiveCodes);
 
             if ($reportedCode) {
@@ -71,7 +74,12 @@ class CiencuadrasActiveProperties
                 ]];
             }
 
-            return [$sourceCode => $this->bestStateFromResults($candidates, $results)];
+            $state = $this->bestStateFromResults($candidates, $results);
+            if ($reportedActiveCodes === null && $state['state'] !== 'active') {
+                $state['state'] = 'unavailable';
+            }
+
+            return [$sourceCode => $state];
         });
     }
 
@@ -85,10 +93,11 @@ class CiencuadrasActiveProperties
         return $this->firstReportedCode([
             $prefix.$sourceCode,
             $prefix.'P'.$sourceCode,
+            $prefix.'PP'.$sourceCode,
         ], $this->reportedActiveCodes($credential));
     }
 
-    protected function inventory(bool $fresh = false): ?Collection
+    public function inventory(bool $fresh = false): ?Collection
     {
         $environment = config('portals.ciencuadras.environment');
         $oldCacheKey = 'ciencuadras.properties-inventory.'.$environment;
@@ -118,9 +127,7 @@ class CiencuadrasActiveProperties
                 return null;
             }
 
-            return collect($result['data']['message'] ?? [])
-                ->filter(fn ($property) => is_array($property) && ! empty($property['propertyCode']))
-                ->values();
+            return $this->inventoryRows($result);
         });
     }
 
@@ -142,22 +149,24 @@ class CiencuadrasActiveProperties
     {
         $message = $response['message'] ?? null;
         $property = is_array($message)
-            && array_is_list($message)
-            && isset($message[0])
-            && is_array($message[0])
-                ? $message[0]
-                : null;
+            ? (array_is_list($message) ? ($message[0] ?? null) : $message)
+            : null;
 
         if (! $property) {
             return [
-                'state' => 'missing',
+                'state' => is_string($message) && (str_contains(strtolower($message), 'no existe')
+                    || str_contains(strtolower($message), 'not found')
+                    || str_contains(strtolower($message), 'no tiene inmuebles')) ? 'missing' : 'unknown',
                 'property' => null,
                 'response' => $response,
             ];
         }
 
+        $label = strtolower((string) ($property['active'] ?? ''));
+        $inactive = in_array((string) ($property['status'] ?? ''), ['5', '8'], true)
+            || str_contains($label, 'inactivo') || str_contains($label, 'eliminado');
         return [
-            'state' => $this->isActiveInventoryProperty($property) ? 'active' : 'inactive',
+            'state' => $this->isActiveInventoryProperty($property) ? 'active' : ($inactive ? 'inactive' : 'unknown'),
             'property' => $property,
             'response' => $response,
         ];
@@ -170,7 +179,7 @@ class CiencuadrasActiveProperties
         foreach ($portalCodes as $portalCode) {
             $result = $results[$portalCode] ?? null;
             if (! ($result['ok'] ?? false)) {
-                $fallback ??= [
+                $fallback = [
                     'state' => 'unavailable',
                     'portal_code' => $portalCode,
                     'property' => null,
@@ -187,7 +196,10 @@ class CiencuadrasActiveProperties
                 return $state;
             }
 
-            $fallback ??= $state;
+            if ($fallback === null || in_array($state['state'], ['unknown', 'unavailable'], true)
+                || ($state['state'] === 'inactive' && $fallback['state'] === 'missing')) {
+                $fallback = $state;
+            }
         }
 
         return $fallback ?? [
@@ -205,8 +217,8 @@ class CiencuadrasActiveProperties
             return null;
         }
 
-        return collect($result['data']['message'] ?? [])
-            ->filter(fn ($property) => is_array($property) && ! empty($property['propertyCode']))
+        return $this->inventoryRows($result)
+            ?->values()
             ->pluck('propertyCode')
             ->map(fn ($code) => trim((string) $code))
             ->filter()
@@ -233,11 +245,56 @@ class CiencuadrasActiveProperties
         return null;
     }
 
+    protected function inventoryRows(array $result): ?Collection
+    {
+        $rows = data_get($result, 'data.message');
+        if (! ($result['ok'] ?? false) || ! is_array($rows) || ! array_is_list($rows)) {
+            return null;
+        }
+        foreach ($rows as $row) {
+            if (! is_array($row) || empty($row['propertyCode'])) {
+                return null;
+            }
+        }
+
+        return collect($rows);
+    }
+
     public function sourceCode(string $portalCode): string
     {
         $prefix = preg_quote((string) config('portals.ciencuadras.property_code_prefix', '22130-'), '/');
 
-        return preg_replace('/^'.$prefix.'P?/i', '', trim($portalCode)) ?? trim($portalCode);
+        return preg_replace('/^'.$prefix.'P*/i', '', trim($portalCode)) ?? trim($portalCode);
+    }
+
+    public function consultForWithdrawal(string $code, PortalCredential $credential): array
+    {
+        $source = $this->sourceCode($code);
+        $prefix = (string) config('portals.ciencuadras.property_code_prefix', '22130-');
+        $inventory = $this->client->consultAllProperties($credential);
+        $rows = $this->inventoryRows($inventory);
+        $inventoryKnown = $rows !== null;
+        $references = ($rows ?? collect())
+            ->filter(fn ($row) => is_array($row) && $this->sourceCode((string) ($row['propertyCode'] ?? '')) === $source)
+            ->pluck('propertyCode')->values();
+        $candidates = collect([$code, $prefix.$source, $prefix.'P'.$source, $prefix.'PP'.$source])
+            ->filter(fn ($candidate) => str_starts_with($candidate, $prefix))
+            ->merge($references)->unique()->values();
+        $confirmed = $inventoryKnown && $references->isEmpty();
+        $checks = [];
+        foreach ($candidates as $candidate) {
+            $result = $this->client->consultProperty($candidate, $credential);
+            $state = $this->stateFromResponse($result['data'] ?? []);
+            $checks[$candidate] = ['ok' => $result['ok'] ?? false, 'state' => $state['state']];
+            $confirmed = $confirmed && ($result['ok'] ?? false)
+                && in_array($state['state'], ['missing', 'inactive'], true);
+        }
+
+        return ['code' => str_starts_with($code, $prefix) ? $code : $prefix.$source, 'result' => [
+            'ok' => $inventoryKnown,
+            'withdrawal_confirmed' => $confirmed,
+            'data' => ['inventory_references' => $references->all(), 'checks' => $checks],
+        ]];
     }
 
     public function cleanCodes(bool $fresh = false): ?Collection

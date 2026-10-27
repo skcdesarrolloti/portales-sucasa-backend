@@ -10,6 +10,7 @@ use App\Services\Portals\ProppitPropertyMapper;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Str;
 use stdClass;
 use Throwable;
@@ -64,10 +65,15 @@ class AutoSyncProppit extends Command
             ->select(['codigo', 'estado', 'fecha_actualizacion', 'cct_modified'])
             ->where('cct_status', 'publish');
 
+        $rotationKey = 'proppit.auto-sync-offset.production';
+        $totalRows = 0;
+        $scanOffset = 0;
         if ($codes->isNotEmpty()) {
             $rowsQuery->whereIn('codigo', $codes->all());
         } else {
-            $rowsQuery->orderByDesc('cct_modified')->limit($scan);
+            $totalRows = (clone $rowsQuery)->count();
+            $scanOffset = $totalRows ? (int) Cache::get($rotationKey, 0) % $totalRows : 0;
+            $rowsQuery->orderBy('codigo')->orderByDesc('cct_modified')->offset($scanOffset)->limit($scan);
         }
 
         $rows = $rowsQuery->get();
@@ -93,17 +99,21 @@ class AutoSyncProppit extends Command
         $executed = 0;
         $summary = ['publish' => 0, 'update' => 0, 'pause' => 0, 'skipped' => 0, 'error' => 0];
 
+        $scanned = 0;
+        $seenCodes = [];
         foreach ($rows as $row) {
             if ($executed >= $limit) {
                 break;
             }
 
+            $scanned++;
             $code = trim((string) $row->codigo);
-            if ($code === '') {
+            if ($code === '' || isset($seenCodes[$code])) {
                 $summary['skipped']++;
                 continue;
             }
 
+            $seenCodes[$code] = true;
             $property = $properties->get($code);
             $sync = $property ? $syncs->get($property->id) : null;
             $decision = $this->decision($row, $sync, (bool) $this->option('retry-errors'));
@@ -139,7 +149,7 @@ class AutoSyncProppit extends Command
                         ['auto_action' => $action, 'response' => $result],
                         $syncStatus === 'error' ? $this->errorMessage($result) : null
                     );
-                    $summary[$action]++;
+                    $summary[$syncStatus === 'error' ? 'error' : $action]++;
                     $executed++;
                     continue;
                 }
@@ -166,6 +176,17 @@ class AutoSyncProppit extends Command
                 }
 
                 $referenceId = (string) $mapped['payload']['referenceId'];
+                if ($sync?->sync_status === 'error') {
+                    $existing = $client->getAd($sync->external_id ?: $referenceId, $token);
+                    if (! ($existing['ok'] ?? false) && (int) ($existing['status'] ?? 0) !== 404) {
+                        $this->saveStatus($property->id, $integration->id, 'error', $sync->external_id ?: $referenceId,
+                            ['auto_action' => 'verify', 'response' => $existing], $this->errorMessage($existing));
+                        $summary['error']++;
+                        $executed++;
+                        continue;
+                    }
+                    $action = ($existing['ok'] ?? false) ? 'update' : 'publish';
+                }
                 $result = $action === 'publish'
                     ? $client->createAd($mapped['payload'], $token)
                     : $client->updateAd($sync?->external_id ?: $referenceId, $mapped['payload'], $token);
@@ -184,9 +205,10 @@ class AutoSyncProppit extends Command
                     $property->update(['status' => 'active', 'published_at' => $property->published_at ?: now()]);
                 }
 
-                $summary[$action]++;
+                $summary[$syncStatus === 'error' ? 'error' : $action]++;
                 $executed++;
             } catch (Throwable $exception) {
+                $executed++;
                 $summary['error']++;
                 $this->error("{$code}: {$exception->getMessage()}");
             }
@@ -194,7 +216,11 @@ class AutoSyncProppit extends Command
 
         $this->info("Listo Proppit. Publicar: {$summary['publish']} | Actualizar: {$summary['update']} | Despublicar: {$summary['pause']} | Omitidos: {$summary['skipped']} | Errores: {$summary['error']}");
 
-        return self::SUCCESS;
+        if (! $dryRun && $codes->isEmpty() && $totalRows > 0) {
+            Cache::put($rotationKey, ($scanOffset + $scanned) % $totalRows, now()->addDay());
+        }
+
+        return $summary['error'] > 0 ? self::FAILURE : self::SUCCESS;
     }
 
     protected function decision(stdClass $row, ?PropertySyncStatus $sync, bool $retryErrors = false): ?string
@@ -212,7 +238,7 @@ class AutoSyncProppit extends Command
             }
 
             if ($current === 'error') {
-                return $retryErrors ? ($sync->external_id ? 'update' : 'publish') : null;
+                return ($retryErrors || \App\Services\Portals\PortalSyncPolicy::retryError($row, $sync)) ? ($sync->external_id ? 'update' : 'publish') : null;
             }
 
             $modifiedAt = $this->wpModifiedAt($row);
@@ -224,7 +250,7 @@ class AutoSyncProppit extends Command
             return null;
         }
 
-        return in_array($current, ['synced', 'pending', 'syncing'], true) ? 'pause' : null;
+        return in_array($current, ['synced', 'error'], true) ? 'pause' : null;
     }
 
     protected function isPublicStatus(?string $status): bool
@@ -236,20 +262,7 @@ class AutoSyncProppit extends Command
 
     protected function wpModifiedAt(stdClass $row): ?Carbon
     {
-        $value = $row->fecha_actualizacion ?: $row->cct_modified ?: null;
-        if (! $value) {
-            return null;
-        }
-
-        if (is_numeric($value)) {
-            return Carbon::createFromTimestamp((int) $value);
-        }
-
-        try {
-            return Carbon::parse($value);
-        } catch (Throwable) {
-            return null;
-        }
+        return \App\Services\Portals\PortalSyncPolicy::modifiedAt($row);
     }
 
     protected function saveStatus(

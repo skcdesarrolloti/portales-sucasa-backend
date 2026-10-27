@@ -106,6 +106,7 @@ class AutoSyncCiencuadras extends Command
         $scanned = 0;
         $summary = ['publish' => 0, 'update' => 0, 'pause' => 0, 'skipped' => 0, 'error' => 0];
 
+        $seenCodes = [];
         foreach ($rows as $row) {
             if ($executed >= $limit) {
                 break;
@@ -114,11 +115,12 @@ class AutoSyncCiencuadras extends Command
             $scanned++;
 
             $code = (string) $row->codigo;
-            if ($code === '') {
+            if ($code === '' || isset($seenCodes[$code])) {
                 $summary['skipped']++;
                 continue;
             }
 
+            $seenCodes[$code] = true;
             $property = $properties->get($code);
             $sync = $property ? $syncs->get($property->id) : null;
 
@@ -132,7 +134,7 @@ class AutoSyncCiencuadras extends Command
 
             if ($action === 'publish' && ! $dryRun) {
                 $portalState = $activeProperties->inspectSourceCodes([$code], $credential)->get($code);
-                if (($portalState['state'] ?? 'unavailable') === 'unavailable') {
+                if (in_array($portalState['state'] ?? 'unavailable', ['unavailable', 'unknown'], true)) {
                     $this->warn("{$code}: omitido; no fue posible verificar el inventario de Ciencuadras.");
                     $summary['skipped']++;
                     continue;
@@ -157,9 +159,8 @@ class AutoSyncCiencuadras extends Command
                 $property = $mapped['property'];
 
                 if ($action !== 'publish' && $sync?->external_id) {
-                    $mapped['payload']['propertyCode'] = preg_match('/(?:^|-)P\d+$/i', $sync->external_id)
-                        ? 'P'.$mapper->portalPropertyCode($sync->external_id)
-                        : $mapper->portalPropertyCode($sync->external_id);
+                    $prefix = preg_quote((string) config('portals.ciencuadras.property_code_prefix', '22130-'), '/');
+                    $mapped['payload']['propertyCode'] = preg_replace('/^'.$prefix.'/i', '', $sync->external_id);
                 }
 
                 if ($mapped['errors']) {
@@ -184,7 +185,7 @@ class AutoSyncCiencuadras extends Command
                 $statusResult = $idRequest
                     ? $client->consultStatus(['idRequest' => $idRequest], $credential)
                     : null;
-                $externalCode = $mapper->lookupCode($mapped['payload']['propertyCode']);
+                $externalCode = (string) config('portals.ciencuadras.property_code_prefix', '22130-').$mapped['payload']['propertyCode'];
                 $consult = $this->consultPropertyWithFallback($client, $mapper, $externalCode, $credential, $status);
                 $externalCode = $consult['code'];
                 $propertyResult = $consult['result'];
@@ -212,9 +213,10 @@ class AutoSyncCiencuadras extends Command
                     $property->update(['status' => 'active', 'published_at' => $property->published_at ?: now()]);
                 }
 
-                $summary[$action]++;
+                $summary[$syncStatus === 'error' ? 'error' : $action]++;
                 $executed++;
             } catch (\Throwable $e) {
+                $executed++;
                 $summary['error']++;
                 $this->error("{$code}: {$e->getMessage()}");
             }
@@ -233,7 +235,7 @@ class AutoSyncCiencuadras extends Command
 
         $this->info("Listo. Publicar: {$summary['publish']} | Actualizar: {$summary['update']} | Despublicar: {$summary['pause']} | Omitidos: {$summary['skipped']} | Errores: {$summary['error']}");
 
-        return self::SUCCESS;
+        return $summary['error'] > 0 ? self::FAILURE : self::SUCCESS;
     }
 
     protected function decision(stdClass $row, ?PropertySyncStatus $sync, bool $retryErrors = false): ?array
@@ -259,7 +261,7 @@ class AutoSyncCiencuadras extends Command
             }
 
             if ($current === 'error') {
-                return $retryErrors ? ['update', 'A'] : null;
+                return ($retryErrors || \App\Services\Portals\PortalSyncPolicy::retryError($row, $sync)) ? ['update', 'A'] : null;
             }
 
             $modifiedAt = $this->wpModifiedAt($row);
@@ -271,7 +273,7 @@ class AutoSyncCiencuadras extends Command
             return null;
         }
 
-        if (in_array($current, ['synced', 'pending', 'syncing'], true)) {
+        if (in_array($current, ['synced', 'error'], true)) {
             return ['pause', 'I'];
         }
 
@@ -287,20 +289,7 @@ class AutoSyncCiencuadras extends Command
 
     protected function wpModifiedAt(stdClass $row): ?Carbon
     {
-        $value = $row->fecha_actualizacion ?: $row->cct_modified ?: null;
-        if (! $value) {
-            return null;
-        }
-
-        if (is_numeric($value)) {
-            return Carbon::createFromTimestamp((int) $value);
-        }
-
-        try {
-            return Carbon::parse($value);
-        } catch (\Throwable) {
-            return null;
-        }
+        return \App\Services\Portals\PortalSyncPolicy::modifiedAt($row);
     }
 
     protected function credential(CiencuadrasClient $client): ?PortalCredential
@@ -345,59 +334,7 @@ class AutoSyncCiencuadras extends Command
 
     protected function syncState(array $result, ?array $statusResult, string $targetStatus, ?array $propertyResult = null): string
     {
-        if ($targetStatus === 'I') {
-            if ($this->responseHasInactive($propertyResult['data'] ?? null)
-                || $this->responseHasNotFound($propertyResult['data'] ?? null)) {
-                return 'paused';
-            }
-
-            if (! ($result['ok'] ?? false)) {
-                return 'error';
-            }
-
-            if ($this->responseHasSuccess($statusResult['data'] ?? null)) {
-                return 'paused';
-            }
-
-            $json = strtolower(json_encode($statusResult['data'] ?? $result['data'] ?? []));
-            if (str_contains($json, 'error') || str_contains($json, 'fall')) {
-                return 'error';
-            }
-
-            if ($this->responseIsPending($statusResult['data'] ?? null)) {
-                return 'pending';
-            }
-
-            return 'pending';
-        }
-
-        if ($this->responseHasActive($propertyResult['data'] ?? null)) {
-            return 'synced';
-        }
-
-        if (! ($result['ok'] ?? false)) {
-            return 'error';
-        }
-
-        if ($this->responseHasSuccess($statusResult['data'] ?? null)) {
-            return 'synced';
-        }
-
-        $json = strtolower(json_encode($statusResult['data'] ?? $result['data'] ?? []));
-        if (str_contains($json, 'error') || str_contains($json, 'fall')) {
-            return 'error';
-        }
-
-        if ($this->responseIsPending($statusResult['data'] ?? null)
-            || $this->responseHasNotFound($propertyResult['data'] ?? null)) {
-            return 'pending';
-        }
-
-        if ($this->responseHasInactive($propertyResult['data'] ?? null)) {
-            return 'error';
-        }
-
-        return 'pending';
+        return \App\Services\Portals\CiencuadrasOperationState::resolve($result, $statusResult, $propertyResult, $targetStatus);
     }
 
     protected function responseHasSuccess($data): bool
@@ -418,6 +355,10 @@ class AutoSyncCiencuadras extends Command
         PortalCredential $credential,
         ?string $targetStatus = null
     ): array {
+        if (in_array($targetStatus, ['I', 'D'], true)) {
+            return (new CiencuadrasActiveProperties($client))->consultForWithdrawal($code, $credential);
+        }
+
         $first = null;
         $isInactiveTarget = in_array($targetStatus, ['I', 'D'], true);
 
@@ -444,6 +385,7 @@ class AutoSyncCiencuadras extends Command
     protected function consultCodeCandidates(CiencuadrasPropertyMapper $mapper, string $code): array
     {
         return array_values(array_unique([
+            ...(str_contains($code, '-P') ? [$code] : []),
             $mapper->lookupCode($code),
             $mapper->legacyLookupCode($code),
         ]));

@@ -46,7 +46,8 @@ class VerifyPendingCiencuadras extends Command
                             });
                     });
             })
-            ->orderByRaw('COALESCE(last_attempt_at, created_at) ASC')
+            ->orderBy('updated_at')
+            ->orderBy('id')
             ->limit(max(1, (int) $this->option('limit')))
             ->get();
 
@@ -74,7 +75,7 @@ class VerifyPendingCiencuadras extends Command
             }
 
             $code = (string) $status->property->code;
-            $externalCode = $mapper->lookupCode($status->external_id ?: $code);
+            $externalCode = $status->external_id ?: $mapper->lookupCode($code);
             $lastResponse = $status->last_response ?? [];
             $idRequest = $client->extractIdRequest($lastResponse);
             $targetStatus = $this->responseValue($lastResponse, 'target_status');
@@ -107,9 +108,10 @@ class VerifyPendingCiencuadras extends Command
                 'external_url' => $this->publicUrlForStatus($syncStatus, $targetStatus, $response, $status->external_url),
                 'last_response' => $response,
                 'last_error' => $error,
-                'last_synced_at' => $syncStatus === 'synced' ? now() : $status->last_synced_at,
+                'last_synced_at' => $syncStatus === 'synced' && $statusResult !== null ? now() : $status->last_synced_at,
             ]);
             $status->save();
+            $status->touch();
 
             if ($syncStatus === 'synced') {
                 $status->property->update(['status' => 'active', 'published_at' => $status->property->published_at ?: now()]);
@@ -163,69 +165,10 @@ class VerifyPendingCiencuadras extends Command
         return $token ? new PortalCredential(['access_token' => $token]) : null;
     }
 
-    protected function syncState(
-        ?array $statusResult,
-        array $propertyResult,
-        ?string $currentStatus,
-        ?string $targetStatus = null
-    ): string
+    protected function syncState(?array $statusResult, array $propertyResult, ?string $currentStatus, ?string $targetStatus = null): string
     {
-        $statusData = $statusResult['data'] ?? null;
-        $propertyData = $propertyResult['data'] ?? null;
-
-        if ($targetStatus === 'I' || $targetStatus === 'D' || $currentStatus === 'paused') {
-            if ($this->responseHasInactive($propertyData) || $this->responseHasNotFound($propertyData)) {
-                return 'paused';
-            }
-
-            if ($this->responseHasSuccess($statusData)) {
-                return 'paused';
-            }
-
-            if ($this->responseHasError($statusData)) {
-                return 'error';
-            }
-
-            if ($this->responseIsPending($statusData)) {
-                return 'pending';
-            }
-
-            if (! ($propertyResult['ok'] ?? false)) {
-                return 'error';
-            }
-
-            return 'pending';
-        }
-
-        if ($this->responseHasActive($propertyData)) {
-            return 'synced';
-        }
-
-        if ($this->responseHasSuccess($statusData)) {
-            return 'synced';
-        }
-
-        if ($this->responseHasError($statusData)) {
-            return 'error';
-        }
-
-        if ($this->responseIsPending($statusData)) {
-            return 'pending';
-        }
-
-        if ($this->responseHasNotFound($propertyData)) {
-            return 'pending';
-        }
-
-        if ($this->responseHasInactive($propertyData)) {
-            return 'error';
-        }
-
-        if ($this->responseHasError($propertyData) || ! ($propertyResult['ok'] ?? false)) {
-            return 'error';
-        }
-
-        return 'pending';
+        return \App\Services\Portals\CiencuadrasOperationState::resolve(null, $statusResult, $propertyResult,
+            $targetStatus ?? ($currentStatus === 'paused' ? 'I' : null));
     }
 
     protected function responseIsPending($data): bool
@@ -240,6 +183,10 @@ class VerifyPendingCiencuadras extends Command
         PortalCredential $credential,
         ?string $targetStatus = null
     ): array {
+        if (in_array($targetStatus, ['I', 'D'], true)) {
+            return (new CiencuadrasActiveProperties($client))->consultForWithdrawal($code, $credential);
+        }
+
         $first = null;
         $isInactiveTarget = in_array($targetStatus, ['I', 'D'], true);
 
@@ -266,6 +213,7 @@ class VerifyPendingCiencuadras extends Command
     protected function consultCodeCandidates(CiencuadrasPropertyMapper $mapper, string $code): array
     {
         return array_values(array_unique([
+            ...(str_contains($code, '-P') ? [$code] : []),
             $mapper->lookupCode($code),
             $mapper->legacyLookupCode($code),
         ]));

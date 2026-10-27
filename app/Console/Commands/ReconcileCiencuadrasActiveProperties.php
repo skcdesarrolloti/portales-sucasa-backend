@@ -77,6 +77,11 @@ class ReconcileCiencuadrasActiveProperties extends Command
             $recentlySent = $status->last_attempt_at
                 && $status->last_attempt_at->gte(now()->subMinutes($graceMinutes));
 
+            if (in_array($status->sync_status, ['pending', 'syncing', 'error'], true)) {
+                $summary['unchanged']++;
+                continue;
+            }
+
             if ($portalCode) {
                 $nextStatus = 'synced';
                 $summary['active']++;
@@ -90,8 +95,9 @@ class ReconcileCiencuadrasActiveProperties extends Command
                 $nextStatus = 'not_synced';
                 $summary['not_synced']++;
             } else {
-                $nextStatus = 'paused';
-                $summary['paused']++;
+                // Absence from a global list cannot confirm withdrawal of every variant.
+                $summary['unchanged']++;
+                continue;
             }
 
             if ($status->sync_status === $nextStatus && (! $portalCode || $status->external_id === $portalCode)) {
@@ -109,20 +115,19 @@ class ReconcileCiencuadrasActiveProperties extends Command
                 'sync_status' => $nextStatus,
                 'external_id' => $portalCode ?: $status->external_id,
                 'external_url' => $nextStatus === 'synced' ? $status->external_url : null,
-                'last_response' => [
-                    'target_action' => 'reconcile',
-                    'target_status' => $nextStatus === 'synced' ? 'A' : null,
+                'last_response' => array_merge($status->last_response ?? [], [
                     'portal_check' => [
                         'active' => $portalCode !== null,
                         'portal_code' => $portalCode,
                         'checked_at' => now()->toISOString(),
                     ],
-                ],
+                ]),
                 'last_error' => match (true) {
                     $nextStatus === 'not_synced' => 'Ciencuadras no reporta este inmueble como activo. Requiere revisión manual; no se enviará otra publicación automáticamente.',
                     default => null,
                 },
-                'last_synced_at' => $nextStatus === 'synced' ? now() : $status->last_synced_at,
+                // Inventory presence is not confirmation that new property data was applied.
+                'last_synced_at' => $status->last_synced_at,
             ]);
             $status->save();
         }

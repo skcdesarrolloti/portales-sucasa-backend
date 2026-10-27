@@ -16,7 +16,7 @@ use Tests\TestCase;
 
 class CiencuadrasStateResolutionTest extends TestCase
 {
-    public function test_manual_action_trusts_active_property_over_timeout_response(): void
+    public function test_manual_action_preserves_timeout_error_despite_old_active_property(): void
     {
         $method = new ReflectionMethod(CiencuadrasController::class, 'syncState');
         $controller = new CiencuadrasController(
@@ -25,7 +25,7 @@ class CiencuadrasStateResolutionTest extends TestCase
             Mockery::mock(CiencuadrasActiveProperties::class),
         );
 
-        $this->assertSame('synced', $method->invoke(
+        $this->assertSame('error', $method->invoke(
             $controller,
             ['ok' => false, 'data' => ['error' => 'Idle timeout reached for update-property']],
             ['ok' => true, 'data' => ['status' => 'error', 'message' => 'Idle timeout reached']],
@@ -34,11 +34,11 @@ class CiencuadrasStateResolutionTest extends TestCase
         ));
     }
 
-    public function test_pending_verification_trusts_active_property_over_status_error(): void
+    public function test_pending_verification_preserves_task_error_despite_old_active_property(): void
     {
         $method = new ReflectionMethod(VerifyPendingCiencuadras::class, 'syncState');
 
-        $this->assertSame('synced', $method->invoke(
+        $this->assertSame('error', $method->invoke(
             new VerifyPendingCiencuadras(),
             ['ok' => true, 'data' => ['status' => 'error', 'message' => 'Idle timeout reached']],
             ['ok' => true, 'data' => ['message' => ['active' => 'Activo', 'status' => '0']]],
@@ -61,11 +61,11 @@ class CiencuadrasStateResolutionTest extends TestCase
         $this->assertSame('0', $result['result']['data']['message'][0]['status']);
     }
 
-    public function test_auto_sync_trusts_active_property_over_timeout_response(): void
+    public function test_auto_sync_preserves_timeout_error_despite_old_active_property(): void
     {
         $method = new ReflectionMethod(AutoSyncCiencuadras::class, 'syncState');
 
-        $this->assertSame('synced', $method->invoke(
+        $this->assertSame('error', $method->invoke(
             new AutoSyncCiencuadras(),
             ['ok' => false, 'data' => ['error' => 'Idle timeout reached for update-property']],
             ['ok' => true, 'data' => ['status' => 'error', 'message' => 'Idle timeout reached']],

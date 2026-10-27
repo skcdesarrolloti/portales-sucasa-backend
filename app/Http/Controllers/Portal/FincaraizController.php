@@ -379,6 +379,8 @@ class FincaraizController extends Controller
         $sync = $this->syncStatus($property);
 
         if (! $sync?->external_id) {
+            abort_if(str_contains((string) $sync?->last_error, 'remote_identity_unknown'), 409,
+                'La tarea venció sin identificar el anuncio. Concilia el inventario antes de volver a publicar.');
             return $this->withRecoveryAction($this->publish($request, $code), 'publish');
         }
 
@@ -446,12 +448,16 @@ class FincaraizController extends Controller
         $sync = $this->syncStatus($property);
         abort_unless($sync, 400, 'No existe una sincronización de Fincaraíz para verificar.');
         $taskId = trim((string) ($request->input('task_id') ?: $this->storedTaskId($sync)));
-        abort_unless($taskId, 400, 'No hay task_id pendiente para verificar.');
 
         $settings = $this->settings($request);
         $apiKey = $this->apiKey($settings);
 
-        $result = $this->fr->getTask($taskId, $apiKey);
+        $result = $taskId ? $this->fr->getTask($taskId, $apiKey)
+            : ['ok' => false, 'status' => 404, 'data' => ['message' => 'Task id not found']];
+        if ((int) ($result['status'] ?? 0) === 404
+            || str_contains(strtolower(json_encode($result['data'] ?? [])), 'task id not found')) {
+            return $this->resolveExpiredTask($sync, $apiKey, $result);
+        }
         if ($result['ok']) {
             $this->applyTaskResult($property, $result['data'], $sync);
         } else {
@@ -479,6 +485,38 @@ class FincaraizController extends Controller
             'requires_activation' => (bool) data_get($fresh->last_response, 'requires_activation', false),
             'listing_verification' => $listingVerification,
         ]]);
+    }
+
+    protected function resolveExpiredTask(PropertySyncStatus $sync, string $apiKey, array $taskResult): JsonResponse
+    {
+        $listing = $sync->external_id ? $this->fr->getListing($apiKey, $sync->external_id) : null;
+        $response = $sync->last_response ?? [];
+        $action = $response['action'] ?? 'publish';
+        $response['expired_task'] = $taskResult;
+        $response['listing_verification'] = $listing['data'] ?? null;
+        $remote = $this->listingRow($listing['data'] ?? []);
+        $remoteStatus = $this->listingStatus($remote);
+        $active = ($listing['ok'] ?? false) && $this->isActiveListingStatus($remoteStatus);
+        $confirmedInactive = ($listing['ok'] ?? false) && in_array(strtoupper((string) $remoteStatus), ['1', 'DISABLED', 'INACTIVE'], true);
+        $paused = $action === 'pause' && ($confirmedInactive || (int) ($listing['status'] ?? 0) === 404);
+        // Presence proves a creation/activation, but never proves an expired update was applied.
+        $published = $active && in_array($action, ['publish', 'activate', 'activate_required'], true);
+        $state = $paused ? 'paused' : ($published ? 'synced' : 'error');
+        $error = $state !== 'error' ? null : (! $sync->external_id
+            ? 'remote_identity_unknown: tarea vencida sin listing_id. Conciliar antes de publicar de nuevo.'
+            : 'task_expired: la tarea venció; se debe recuperar la operación sobre el anuncio existente.');
+        $sync->update([
+            'sync_status' => $state,
+            'last_response' => $response,
+            'last_error' => $error,
+            'last_attempt_at' => now(),
+            'attempts' => $sync->attempts + 1,
+            'external_url' => $paused ? null : ($published ? $this->listingPublicUrl($this->listingPropertyId($remote)) : $sync->external_url),
+            'last_synced_at' => $state === 'error' ? $sync->last_synced_at : now(),
+        ]);
+
+        return response()->json(['Datos' => ['ok' => $state !== 'error', 'sync_status' => $state,
+            'external_id' => $sync->external_id, 'message' => $error, 'action' => $action]], $state === 'error' ? 409 : 200);
     }
 
     public function subscribeWebhook(Request $request): JsonResponse

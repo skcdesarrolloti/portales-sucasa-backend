@@ -213,6 +213,55 @@ class FincaraizWebhookTest extends TestCase
         $this->assertNull($sync->last_error);
     }
 
+    public function test_expired_update_is_not_confirmed_by_an_old_active_listing(): void
+    {
+        $integration = Integration::create(['name' => 'Fincaraíz', 'slug' => 'fincaraiz']);
+        $property = Property::create(['code' => '123', 'title' => 'Casa']);
+        PropertySyncStatus::create([
+            'property_id' => $property->id, 'integration_id' => $integration->id,
+            'environment' => 'qa', 'sync_status' => 'pending', 'external_id' => 'listing-123',
+            'last_synced_at' => '2026-01-01 00:00:00',
+            'last_response' => ['action' => 'update', 'task_id' => 'expired'],
+        ]);
+        $client = $this->createMock(FincaraizClient::class);
+        $client->expects($this->once())->method('getTask')->willReturn([
+            'ok' => false, 'status' => 404, 'data' => ['detail' => 'Task id not found'],
+        ]);
+        $client->expects($this->once())->method('getListing')->willReturn([
+            'ok' => true, 'data' => ['id' => 'listing-123', 'status' => 4],
+        ]);
+        $response = $this->controller($client)->verify(Request::create('/verify', 'POST'), '123');
+        $sync = PropertySyncStatus::first();
+        $this->assertSame(409, $response->getStatusCode());
+        $this->assertSame('error', $sync->sync_status);
+        $this->assertStringContainsString('task_expired', $sync->last_error);
+        $this->assertSame('2026-01-01', $sync->last_synced_at->toDateString());
+    }
+
+    public function test_expired_task_without_listing_id_requires_reconciliation_before_recovery(): void
+    {
+        $integration = Integration::create(['name' => 'Fincaraíz', 'slug' => 'fincaraiz']);
+        $property = Property::create(['code' => '123', 'title' => 'Casa']);
+        PropertySyncStatus::create([
+            'property_id' => $property->id, 'integration_id' => $integration->id,
+            'environment' => 'qa', 'sync_status' => 'pending',
+            'last_response' => ['action' => 'publish', 'task_id' => 'expired'],
+        ]);
+        $client = $this->createMock(FincaraizClient::class);
+        $client->expects($this->once())->method('getTask')->willReturn([
+            'ok' => false, 'status' => 404, 'data' => ['detail' => 'Task id not found'],
+        ]);
+        $client->expects($this->never())->method('getListing');
+        $client->expects($this->never())->method('createListing');
+        $controller = $this->controller($client);
+        $controller->verify(Request::create('/verify', 'POST'), '123');
+        $sync = PropertySyncStatus::first();
+        $this->assertSame('error', $sync->sync_status);
+        $this->assertStringContainsString('remote_identity_unknown', $sync->last_error);
+        $this->expectException(\Symfony\Component\HttpKernel\Exception\HttpException::class);
+        $controller->recover(Request::create('/recover', 'POST'), '123');
+    }
+
     private function controller(?FincaraizClient $client = null): FincaraizController
     {
         return new FincaraizController(

@@ -27,7 +27,7 @@ class CiencuadrasClient
                 'timeout' => 30,
             ]);
 
-            return ['ok' => true, 'data' => json_decode((string) $response->getBody(), true)];
+            return ['ok' => $response->getStatusCode() >= 200 && $response->getStatusCode() < 300, 'status' => $response->getStatusCode(), 'data' => json_decode((string) $response->getBody(), true) ?? []];
         } catch (RequestException $e) {
             return ['ok' => false, 'data' => $this->errorData($e)];
         } catch (GuzzleException $e) {
@@ -69,7 +69,7 @@ class CiencuadrasClient
             ->map(function (array $settled) {
                 if ($settled['state'] === 'fulfilled') {
                     return [
-                        'ok' => true,
+                        'ok' => $settled['value']->getStatusCode() >= 200 && $settled['value']->getStatusCode() < 300,
                         'data' => json_decode((string) $settled['value']->getBody(), true),
                     ];
                 }
@@ -132,7 +132,7 @@ class CiencuadrasClient
             $code = trim((string) ($property['propertyCode'] ?? ''));
             $status = strtoupper(trim((string) ($property['status'] ?? 'A')));
 
-            if ($rejectLegacyActive && $status === 'A' && preg_match('/(?:^|-)P\d+$/i', $code)) {
+            if ($rejectLegacyActive && $status === 'A' && preg_match('/(?:^|-)P+\d+$/i', $code)) {
                 throw new \InvalidArgumentException(
                     "Se bloqueó el envío del código legado {$code}. Las publicaciones activas deben usar el código limpio."
                 );
@@ -155,7 +155,7 @@ class CiencuadrasClient
                 'timeout' => 45,
             ]);
 
-            return ['ok' => true, 'data' => json_decode((string) $response->getBody(), true)];
+            return ['ok' => $response->getStatusCode() >= 200 && $response->getStatusCode() < 300, 'status' => $response->getStatusCode(), 'data' => json_decode((string) $response->getBody(), true) ?? []];
         } catch (RequestException $e) {
             Log::warning('CC request failed', ['path' => $path, 'err' => $e->getMessage()]);
 
