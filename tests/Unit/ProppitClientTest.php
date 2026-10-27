@@ -220,6 +220,22 @@ class ProppitClientTest extends TestCase
         $this->assertFalse($result['data']['publishingEnabled']);
     }
 
+    public function test_single_ad_lookup_preserves_http_status_for_recovery_decisions(): void
+    {
+        $client = $this->clientWith([
+            new Response(404, [], '{"error":"Ad not found"}'),
+            new Response(401, [], '{"error":"Unauthorized"}'),
+            new Response(500, [], '{"error":"Server error"}'),
+        ]);
+
+        foreach ([404, 401, 500] as $status) {
+            $result = $client->getAd('missing', 'token');
+            $this->assertFalse($result['ok']);
+            $this->assertSame($status, $result['status']);
+            $this->assertSame($status, $result['data']['status']);
+        }
+    }
+
     public function test_get_ads_verifies_multiple_known_references(): void
     {
         config()->set('portals.proppit.publisher_external_id', 'sucasa');

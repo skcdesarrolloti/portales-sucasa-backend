@@ -10,7 +10,7 @@ Artisan::command('inspire', function () {
 
 Schedule::command('ciencuadras:verify-pending --limit=25')
     ->everyMinute()
-    ->withoutOverlapping();
+    ->withoutOverlapping(60);
 
 Schedule::command('fincaraiz:auto-sync')
     ->everyFiveMinutes()

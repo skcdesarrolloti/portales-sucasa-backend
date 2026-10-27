@@ -181,7 +181,7 @@ class ProppitClient
         } catch (RequestException $e) {
             Log::warning('Proppit request failed', ['path' => $path, 'err' => $e->getMessage()]);
 
-            return ['ok' => false, 'data' => $this->errorData($e)];
+            return ['ok' => false, 'status' => $e->getResponse()?->getStatusCode(), 'data' => $this->errorData($e)];
         } catch (GuzzleException $e) {
             Log::warning('Proppit request failed', ['path' => $path, 'err' => $e->getMessage()]);
 
